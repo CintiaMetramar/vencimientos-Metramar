@@ -10,6 +10,7 @@ from fpdf import FPDF
 # ==========================================
 st.set_page_config(page_title="Gestión Flota - Metramar", page_icon="🚛", layout="wide")
 
+# Tus encabezados exactos (incluyendo la errata del ERP)
 COLS_SEMANAL = ['Tipo Dococumento', 'Empresa', 'Conductor', 'Vehiculo', 'Matricula', 'Marca', 'TipoVehiculo', 'Vencimiento']
 COLS_MAESTRO = ['Tipo', 'Empresa', 'Conductor', 'Vehículo', 'Matricula', 'Marca', 'Tipo de vehículo', 'Fecha de vencimiento', 'Telefono']
 MAPEO_A_MAESTRO = {'Tipo Dococumento': 'Tipo', 'Vehiculo': 'Vehículo', 'TipoVehiculo': 'Tipo de vehículo', 'Vencimiento': 'Fecha de vencimiento'}
@@ -64,16 +65,17 @@ with col2:
     uploaded_weekly = st.file_uploader("2️⃣ Fichero SEMANAL ERP", type=["xls", "xlsx"])
 
 if uploaded_master and uploaded_weekly:
-    df_final = pd.DataFrame() # Inicializar
+    df_final = pd.DataFrame()
     
     try:
+        # Carga de ficheros
         df_m = pd.read_excel(uploaded_master)
         if uploaded_weekly.name.endswith('.xls'):
             df_s = pd.read_excel(uploaded_weekly, engine='xlrd')
         else:
             df_s = pd.read_excel(uploaded_weekly)
 
-        # Validar columnas
+        # Validación estricta de columnas
         missing_s = [c for c in COLS_SEMANAL if c not in df_s.columns]
         missing_m = [c for c in COLS_MAESTRO if c not in df_m.columns]
 
@@ -81,12 +83,14 @@ if uploaded_master and uploaded_weekly:
             st.error(f"❌ Error de columnas. Faltan en Semanal: {missing_s} | Faltan en Maestro: {missing_m}")
             st.stop()
 
-        # Fusión
+        # Fusión y Normalización
         df_s_clean = df_s[COLS_SEMANAL].rename(columns=MAPEO_A_MAESTRO)
         df_m['Matricula_Match'] = df_m['Matricula'].astype(str).str.strip().str.upper()
         df_s_clean['Matricula_Match'] = df_s_clean['Matricula'].astype(str).str.strip().str.upper()
 
         merged = pd.merge(df_m, df_s_clean[['Matricula_Match', 'Fecha de vencimiento']], on='Matricula_Match', how='left', suffixes=('_old', '_new'))
+        
+        # Priorizar fecha nueva
         merged['Fecha de vencimiento'] = merged['Fecha de vencimiento_new'].fillna(merged['Fecha de vencimiento_old'])
         df_final = merged.drop(columns=['Matricula_Match', 'Fecha de vencimiento_new', 'Fecha de vencimiento_old'], errors='ignore')
         df_final['Fecha de vencimiento'] = pd.to_datetime(df_final['Fecha de vencimiento'], errors='coerce')
@@ -96,16 +100,23 @@ if uploaded_master and uploaded_weekly:
         st.stop()
 
     # ==========================================
-    # 🚦 3. INFORME Y ALERTAS (DENTRO DEL IF)
+    # 🚦 3. INFORME Y ALERTAS (CON FILTRO TEMPORAL)
     # ==========================================
+    st.divider()
     st.subheader("📊 Análisis de Vencimientos Próximos")
     
     hoy = datetime.now()
     rango_alerta = hoy + timedelta(days=30)
-    df_alertas = df_final[df_final['Fecha de vencimiento'] <= rango_alerta].copy()
+    limite_pasado = hoy - timedelta(days=15)
+
+    # Máscara de filtrado (15 días atrás hasta 30 días adelante)
+    mask = (df_final['Fecha de vencimiento'] >= limite_pasado) & \
+           (df_final['Fecha de vencimiento'] <= rango_alerta)
+    
+    df_alertas = df_final[mask].copy()
 
     if df_alertas.empty:
-        st.success("✅ Todo al día. No hay vencimientos en los próximos 30 días.")
+        st.success(f"✅ Todo al día. No hay vencimientos pendientes entre el {limite_pasado.strftime('%d/%m')} y el {rango_alerta.strftime('%d/%m')}.")
     else:
         resumen = []
         for _, row in df_alertas.iterrows():
@@ -113,6 +124,7 @@ if uploaded_master and uploaded_weekly:
             conductor = row.get('Conductor', 'Sin Asignar')
             matricula = row.get('Matricula', 'S/M')
             
+            # Semáforo
             if pd.isna(fecha_venc): bola = "⚪"
             elif fecha_venc < hoy: bola = "🔴 VENCIDO"
             elif fecha_venc <= hoy + timedelta(days=7): bola = "🟡 URGENTE"
@@ -120,7 +132,7 @@ if uploaded_master and uploaded_weekly:
 
             fecha_str = fecha_venc.strftime('%d/%m/%Y') if pd.notna(fecha_venc) else "S/D"
             
-            # TU MENSAJE PERSONALIZADO
+            # TU MENSAJE PERSONALIZADO DE WHATSAPP
             texto = (
                 f"🚨 *AVISO DE VENCIMIENTO* 🚨\n"
                 f"📌 Tipo: {row.get('Tipo','')}\n"
@@ -139,6 +151,7 @@ if uploaded_master and uploaded_weekly:
 
             texto += "\n📩 Si ya no llevas este camión responde a este mensaje con la matrícula del camión que llevas actualmente."
 
+            # Link de WhatsApp
             wa_link = None
             tel = str(row.get('Telefono', '')).replace(".0", "").strip()
             if tel and tel != "nan" and tel != "":
@@ -148,24 +161,26 @@ if uploaded_master and uploaded_weekly:
 
             resumen.append({"bola": bola, "Matricula": matricula, "Conductor": conductor, "Fecha_Str": fecha_str, "link": wa_link})
 
+        # Mostrar tabla de resultados
         for r in resumen:
-            c1, c2, c3, c4, c5 = st.columns([1, 1, 2, 1, 1])
-            c1.write(r["bola"])
-            c2.write(r["Matricula"])
-            c3.write(r["Conductor"])
-            c4.write(r["Fecha_Str"])
-            if r["link"]: c5.link_button("📲 Enviar", r["link"])
-            else: c5.write("🚫 S/T")
-            st.divider()
+            with st.container():
+                c1, c2, c3, c4, c5 = st.columns([1, 1, 2, 1, 1])
+                c1.write(r["bola"])
+                c2.write(r["Matricula"])
+                c3.write(r["Conductor"])
+                c4.write(r["Fecha_Str"])
+                if r["link"]: c5.link_button("📲 Enviar", r["link"])
+                else: c5.write("🚫 S/T")
+                st.divider()
 
-        # Descargas
+        # Sección de Descargas
         st.subheader("📥 Exportar Resultados")
         col_a, col_b = st.columns(2)
         with col_a:
             pdf_bytes = generar_pdf(pd.DataFrame(resumen))
-            st.download_button("📄 Descargar PDF", pdf_bytes, "informe.pdf", "application/pdf")
+            st.download_button("📄 Descargar PDF (Filtrado)", pdf_bytes, f"Reporte_{datetime.now().strftime('%d_%m')}.pdf", "application/pdf")
         with col_b:
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_final.to_excel(writer, index=False)
-            st.download_button("💾 Descargar Maestro Actualizado", output.getvalue(), "maestro_final.xlsx")
+            st.download_button("💾 Descargar Maestro Completo", output.getvalue(), "maestro_actualizado.xlsx")
